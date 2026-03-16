@@ -1,7 +1,8 @@
 import { supabase } from './supabase.js'
 
-// 2026 NCAA Tournament dates (Round of 64 onward — Play-In not counted)
+// 2026 NCAA Tournament dates (including Play-In)
 const TOURNAMENT_DATES = [
+  '20260317', '20260318', // First Four / Play-In
   '20260319', '20260320', // Round of 64
   '20260321', '20260322', // Round of 32
   '20260326', '20260327', // Sweet Sixteen
@@ -11,6 +12,7 @@ const TOURNAMENT_DATES = [
 ]
 
 const ESPN_ROUND_MAP = {
+  'first four': 'Play-In',
   'first round': 'Round of 64',
   'second round': 'Round of 32',
   'sweet sixteen': 'Sweet Sixteen',

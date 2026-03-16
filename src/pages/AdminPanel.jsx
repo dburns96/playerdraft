@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
 import { syncTournamentScores } from '../lib/espnSync.js'
 
-const ROUNDS = ['Round of 64', 'Round of 32', 'Sweet Sixteen', 'Elite Eight', 'Final Four', 'Championship']
+const ROUNDS = ['Play-In', 'Round of 64', 'Round of 32', 'Sweet Sixteen', 'Elite Eight', 'Final Four', 'Championship']
 const TABS = ['Drafters', 'Players', 'Scores', 'ESPN Sync']
 
 // ─── Drafters Tab ──────────────────────────────────────────────────────────────

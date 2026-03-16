@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase.js'
 
-const ROUNDS = ['Round of 64', 'Round of 32', 'Sweet Sixteen', 'Elite Eight', 'Final Four', 'Championship']
-const ROUND_SHORT = { 'Round of 64': 'R64', 'Round of 32': 'R32', 'Sweet Sixteen': 'S16', 'Elite Eight': 'E8', 'Final Four': 'F4', 'Championship': 'NAT' }
+const ROUNDS = ['Play-In', 'Round of 64', 'Round of 32', 'Sweet Sixteen', 'Elite Eight', 'Final Four', 'Championship']
+const ROUND_SHORT = { 'Play-In': 'PI', 'Round of 64': 'R64', 'Round of 32': 'R32', 'Sweet Sixteen': 'S16', 'Elite Eight': 'E8', 'Final Four': 'F4', 'Championship': 'NAT' }
 
 export default function PlayerScores() {
   const [drafters, setDrafters] = useState([])
