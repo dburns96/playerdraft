@@ -1,7 +1,5 @@
 import { Outlet, NavLink } from 'react-router-dom'
 
-const ADMIN_SLUG = import.meta.env.VITE_ADMIN_SLUG
-
 function NavItem({ to, children }) {
   return (
     <NavLink
@@ -31,12 +29,6 @@ export default function Layout() {
           <nav className="flex gap-1 flex-wrap">
             <NavItem to="/">Standings</NavItem>
             <NavItem to="/scores">Player Scores</NavItem>
-            {ADMIN_SLUG && (
-              <>
-                <NavItem to={`/draft/${ADMIN_SLUG}`}>Draft Mode</NavItem>
-                <NavItem to={`/admin/${ADMIN_SLUG}`}>Admin</NavItem>
-              </>
-            )}
           </nav>
         </div>
       </header>
