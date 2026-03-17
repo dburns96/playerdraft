@@ -46,8 +46,8 @@ function PlayerRow({ player, idx, isEliminated }) {
       className={`border-t border-slate-100 transition-colors ${isAlt ? 'bg-slate-50/60' : 'bg-white'} ${isEliminated ? 'opacity-60' : ''}`}
       style={{ borderLeft: `4px solid ${borderColor}` }}
     >
-      <td className="px-3 py-2">
-        <div className="flex items-center gap-2">
+      <td className="px-3 py-2 max-w-0">
+        <div className="flex items-center gap-2 overflow-hidden">
           {logoUrl && (
             <img
               src={logoUrl}
@@ -56,16 +56,18 @@ function PlayerRow({ player, idx, isEliminated }) {
               onError={e => { e.target.style.display = 'none' }}
             />
           )}
-          <span className={isEliminated ? 'line-through text-slate-400' : 'font-semibold text-slate-800'}>
+          <span className={`truncate ${isEliminated ? 'line-through text-slate-400' : 'font-semibold text-slate-800'}`}>
             {player.name}
           </span>
           {isEliminated && (
-            <span className="text-xs bg-red-100 text-red-500 px-1.5 py-0.5 rounded font-semibold">OUT</span>
+            <span className="text-xs bg-red-100 text-red-500 px-1.5 py-0.5 rounded font-semibold shrink-0">OUT</span>
           )}
         </div>
       </td>
-      <td className="px-3 py-2 hidden sm:table-cell">
-        <TeamBadge team={player.team} />
+      <td className="px-3 py-2 hidden sm:table-cell max-w-0">
+        <div className="overflow-hidden">
+          <TeamBadge team={player.team} />
+        </div>
       </td>
       <td className="px-2 py-2 text-center text-slate-400 text-xs hidden md:table-cell">
         {player.season_ppg ?? '—'}
@@ -192,7 +194,14 @@ export default function PlayerScores() {
             </div>
 
             <div className="overflow-x-auto rounded-xl shadow-sm border border-slate-200">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm table-fixed">
+                <colgroup>
+                  <col className="w-44" />
+                  <col className="w-36 hidden sm:table-column" />
+                  <col className="w-12 hidden md:table-column" />
+                  {ROUNDS.map(r => <col key={r} className="w-10" />)}
+                  <col className="w-14" />
+                </colgroup>
                 <thead>
                   <tr className="bg-[#1e3a5f] text-white">
                     <th className="text-left px-3 py-2.5 font-semibold">Player</th>
