@@ -29,6 +29,7 @@ export default function Layout() {
           <nav className="flex gap-1 flex-wrap">
             <NavItem to="/">Standings</NavItem>
             <NavItem to="/scores">Player Scores</NavItem>
+            <NavItem to="/projections">Projections</NavItem>
           </nav>
         </div>
       </header>
