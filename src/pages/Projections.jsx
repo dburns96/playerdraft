@@ -213,7 +213,7 @@ export default function Projections() {
         <div>
           <h2 className="text-2xl font-bold text-[#1e3a5f]">Projections</h2>
           <p className="text-sm text-slate-500">
-            Based on {n_sims.toLocaleString()} Monte Carlo simulations by your league's data scientist.
+            Based on {n_sims.toLocaleString()} Monte Carlo simulations by the league's VP of Data Science.
           </p>
         </div>
         <div className="flex gap-1 border border-slate-200 rounded-lg p-1 bg-white">
