@@ -1,7 +1,7 @@
 import { supabase } from './supabase.js'
 
 const TOURNAMENT_DATES = [
-  '20260317', '20260318', // First Four / Play-In
+  '20260317', '20260318', // Play-In
   '20260319', '20260320', // Round of 64
   '20260321', '20260322', // Round of 32
   '20260326', '20260327', // Sweet Sixteen
@@ -10,18 +10,6 @@ const TOURNAMENT_DATES = [
   '20260406',             // Championship
 ]
 
-// Match ESPN round labels to our round names — cast a wide net
-const ESPN_ROUND_MAP = [
-  { patterns: ['first four', 'first 4', 'opening round', 'play-in', 'play in'],   round: 'Play-In' },
-  { patterns: ['first round', 'round of 64', '1st round'],                         round: 'Round of 64' },
-  { patterns: ['second round', 'round of 32', '2nd round'],                        round: 'Round of 32' },
-  { patterns: ['sweet sixteen', 'sweet 16', 'regional semifinal'],                 round: 'Sweet Sixteen' },
-  { patterns: ['elite eight', 'elite 8', 'regional final'],                        round: 'Elite Eight' },
-  { patterns: ['final four', 'national semifinal'],                                 round: 'Final Four' },
-  { patterns: ['national championship', 'championship', 'title game', 'final'],    round: 'Championship' },
-]
-
-// Date-based fallback: we know exactly which dates = which rounds
 const DATE_TO_ROUND = {
   '20260317': 'Play-In',
   '20260318': 'Play-In',
@@ -37,18 +25,66 @@ const DATE_TO_ROUND = {
   '20260406': 'Championship',
 }
 
+const SUFFIXES = new Set(['jr', 'sr', 'ii', 'iii', 'iv', 'v'])
+
+function normalizeName(name) {
+  return name.toLowerCase().trim()
+    .replace(/[^a-z\s]/g, '')
+    .replace(/\s+/g, ' ')
+}
+
+function extractParts(name) {
+  const parts = normalizeName(name).split(' ').filter(p => p && !SUFFIXES.has(p))
+  return {
+    first: parts[0] || '',
+    last: parts[parts.length - 1] || '',
+    full: parts.join(' '),
+  }
+}
+
+function findBestNameMatch(ourName, espnNames) {
+  const our = extractParts(ourName)
+
+  // 1. Exact normalized match (suffixes stripped)
+  for (const en of espnNames) {
+    if (extractParts(en).full === our.full) return en
+  }
+
+  // 2. Last name + first initial
+  for (const en of espnNames) {
+    const ep = extractParts(en)
+    if (ep.last === our.last && ep.first[0] === our.first[0]) return en
+  }
+
+  // 3. Last name only — only if unique and at least 4 chars (avoids suffix collisions)
+  if (our.last.length >= 4) {
+    const matches = espnNames.filter(en => extractParts(en).last === our.last)
+    if (matches.length === 1) return matches[0]
+  }
+
+  return null
+}
+
 function detectRoundName(event, dateStr) {
-  // First try ESPN fields
+  // Try ESPN text fields first
   const comp = event.competitions?.[0]
   const candidates = [
     event.notes?.[0]?.headline,
     comp?.notes?.[0]?.headline,
-    comp?.notes?.[0]?.type,
-    event.season?.slug,
     event.name,
     event.shortName,
     comp?.type?.text,
   ].filter(Boolean).map(s => s.toLowerCase())
+
+  const ESPN_ROUND_MAP = [
+    { patterns: ['first four', 'play-in', 'opening round'], round: 'Play-In' },
+    { patterns: ['first round', 'round of 64'],             round: 'Round of 64' },
+    { patterns: ['second round', 'round of 32'],            round: 'Round of 32' },
+    { patterns: ['sweet sixteen', 'sweet 16'],              round: 'Sweet Sixteen' },
+    { patterns: ['elite eight', 'elite 8'],                 round: 'Elite Eight' },
+    { patterns: ['final four'],                             round: 'Final Four' },
+    { patterns: ['national championship', 'championship'],  round: 'Championship' },
+  ]
 
   for (const { patterns, round } of ESPN_ROUND_MAP) {
     for (const candidate of candidates) {
@@ -58,32 +94,24 @@ function detectRoundName(event, dateStr) {
     }
   }
 
-  // Fallback: infer round from date — reliable since we only query tournament dates
+  // Fallback: infer from date — reliable since we only query known tournament dates
   return DATE_TO_ROUND[dateStr] || null
 }
 
-function normalizeName(name) {
-  return name.toLowerCase().trim()
-    .replace(/[^a-z\s]/g, '')
-    .replace(/\s+/g, ' ')
-}
-
-function parsePlayerPointsFromSummary(summary, roundName) {
+function parsePlayerPoints(summary, roundName) {
   const results = {}
   if (!summary?.boxscore?.players) return results
 
   for (const teamData of summary.boxscore.players) {
     for (const statGroup of teamData.statistics || []) {
-      const names = statGroup.names || []
-      const ptsIndex = names.indexOf('PTS')
+      const ptsIndex = (statGroup.names || []).indexOf('PTS')
       if (ptsIndex === -1) continue
-
       for (const athlete of statGroup.athletes || []) {
-        const displayName = athlete.athlete?.displayName
+        const name = athlete.athlete?.displayName
         const pts = parseInt(athlete.stats?.[ptsIndex], 10)
-        if (displayName && !isNaN(pts)) {
-          if (!results[displayName] || pts > results[displayName].points) {
-            results[displayName] = { points: pts, roundName }
+        if (name && !isNaN(pts)) {
+          if (!results[name] || pts > results[name].points) {
+            results[name] = { points: pts, roundName }
           }
         }
       }
@@ -92,91 +120,13 @@ function parsePlayerPointsFromSummary(summary, roundName) {
   return results
 }
 
-function findBestNameMatch(ourName, espnNames) {
-  const norm = normalizeName(ourName)
-  const parts = norm.split(' ')
-  const lastName = parts[parts.length - 1]
-  const firstName = parts[0]
-
-  // 1. Exact normalized match
-  for (const en of espnNames) {
-    if (normalizeName(en) === norm) return en
-  }
-
-  // 2. Last name + first initial
-  for (const en of espnNames) {
-    const en_norm = normalizeName(en)
-    const en_parts = en_norm.split(' ')
-    if (en_parts[en_parts.length - 1] === lastName && en_norm[0] === firstName[0]) return en
-  }
-
-  // 3. Last name only (unique)
-  const lastNameMatches = espnNames.filter(en => {
-    const en_parts = normalizeName(en).split(' ')
-    return en_parts[en_parts.length - 1] === lastName
-  })
-  if (lastNameMatches.length === 1) return lastNameMatches[0]
-
-  return null
-}
-
-async function autoEliminateLosers(events, onProgress) {
-  // Build a set of team names that lost completed tournament games
-  const losingTeams = new Set()
-
-  for (const event of events) {
-    if (!event.status?.type?.completed) continue
-    const competitors = event.competitions?.[0]?.competitors || []
-    for (const c of competitors) {
-      if (c.winner === false) {
-        const name = c.team?.displayName || c.team?.name || ''
-        if (name) losingTeams.add(name.toLowerCase())
-      }
-    }
-  }
-
-  if (losingTeams.size === 0) return
-
-  onProgress?.(`Checking eliminations for ${losingTeams.size} losing team(s)...`)
-
-  // Get all non-eliminated players with their team name
-  const { data: players } = await supabase
-    .from('players')
-    .select('id, name, team')
-    .eq('is_eliminated', false)
-    .not('drafter_id', 'is', null)
-
-  if (!players?.length) return
-
-  const toEliminate = players.filter(p => {
-    const team = p.team.toLowerCase()
-    // Check direct match or partial match against losing teams
-    for (const loser of losingTeams) {
-      if (loser.includes(team) || team.includes(loser.split(' ')[0])) return true
-    }
-    return false
-  })
-
-  if (toEliminate.length === 0) return
-
-  const ids = toEliminate.map(p => p.id)
-  await supabase.from('players').update({ is_eliminated: true }).in('id', ids)
-
-  const names = toEliminate.map(p => `${p.name} (${p.team})`).join(', ')
-  onProgress?.(`✓ Auto-eliminated ${toEliminate.length} player(s): ${names}`)
-}
-
-function todayStr() {
-  return new Date().toISOString().slice(0, 10).replace(/-/g, '')
-}
-
 async function fetchEventsForDate(dateStr) {
   const url = `https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=${dateStr}&groups=100&limit=100`
   try {
     const res = await fetch(url)
     const data = await res.json()
     return data.events || []
-  } catch (e) {
+  } catch {
     return []
   }
 }
@@ -191,6 +141,50 @@ async function fetchGameSummary(eventId) {
   }
 }
 
+async function autoEliminateLosers(completedEvents, onProgress) {
+  const losingTeams = new Set()
+  for (const event of completedEvents) {
+    const competitors = event.competitions?.[0]?.competitors || []
+    for (const c of competitors) {
+      if (c.winner === false) {
+        const name = c.team?.displayName || c.team?.name || ''
+        if (name) losingTeams.add(name.toLowerCase())
+      }
+    }
+  }
+
+  if (losingTeams.size === 0) return
+  onProgress?.(`Checking eliminations against ${losingTeams.size} team(s) that lost...`)
+
+  const { data: players } = await supabase
+    .from('players')
+    .select('id, name, team')
+    .eq('is_eliminated', false)
+
+  if (!players?.length) return
+
+  const toEliminate = players.filter(p => {
+    const team = p.team.toLowerCase()
+    for (const loser of losingTeams) {
+      if (loser.includes(team) || team.includes(loser.split(' ')[0])) return true
+    }
+    return false
+  })
+
+  if (toEliminate.length === 0) {
+    onProgress?.('No new eliminations detected.')
+    return
+  }
+
+  const ids = toEliminate.map(p => p.id)
+  await supabase.from('players').update({ is_eliminated: true }).in('id', ids)
+  onProgress?.(`✓ Auto-eliminated: ${toEliminate.map(p => `${p.name} (${p.team})`).join(', ')}`)
+}
+
+function todayStr() {
+  return new Date().toISOString().slice(0, 10).replace(/-/g, '')
+}
+
 export async function syncTournamentScores(onProgress) {
   const today = todayStr()
   const datesToFetch = TOURNAMENT_DATES.filter(d => d <= today)
@@ -199,60 +193,49 @@ export async function syncTournamentScores(onProgress) {
     return { matched: [], unmatched: [], message: 'Tournament has not started yet.' }
   }
 
-  onProgress?.(`Checking ${datesToFetch.length} tournament date(s) up to today...`)
+  onProgress?.(`Checking ${datesToFetch.length} tournament date(s)...`)
 
-  // Collect all player stats across completed games
+  // Step 1: Collect all completed events and player stats
   const allStats = {}
+  const completedEvents = []
   let gamesProcessed = 0
 
   for (const dateStr of datesToFetch) {
     const events = await fetchEventsForDate(dateStr)
-    onProgress?.(`${dateStr}: found ${events.length} events`)
+    onProgress?.(`${dateStr}: found ${events.length} event(s)`)
 
     for (const event of events) {
-      const isCompleted = event.status?.type?.completed
-      if (!isCompleted) continue
+      if (!event.status?.type?.completed) continue
+
+      completedEvents.push(event)
 
       const roundName = detectRoundName(event, dateStr)
-
-      // Log what we see so you can debug mismatches
-      const comp0 = event.competitions?.[0]
-      const headline = event.notes?.[0]?.headline
-        || comp0?.notes?.[0]?.headline
-        || comp0?.type?.text
-        || event.name
-        || '(no usable field)'
-      onProgress?.(`  ✓ ${event.shortName || event.id} → round: "${roundName || '?'}" (ESPN: "${headline}")`)
+      const label = event.shortName || event.id
+      onProgress?.(`  ✓ ${label} → ${roundName || '?'}`)
 
       if (!roundName) continue
 
       const summary = await fetchGameSummary(event.id)
       if (!summary) continue
 
-      const gamePlayers = parsePlayerPointsFromSummary(summary, roundName)
+      const gamePlayers = parsePlayerPoints(summary, roundName)
       for (const [name, stats] of Object.entries(gamePlayers)) {
         if (!allStats[name]) allStats[name] = []
-        const exists = allStats[name].some(s => s.roundName === stats.roundName)
-        if (!exists) allStats[name].push(stats)
+        if (!allStats[name].some(s => s.roundName === stats.roundName)) {
+          allStats[name].push(stats)
+        }
       }
       gamesProcessed++
     }
   }
 
-  await autoEliminateLosers(allCompletedEvents, onProgress)
-
   const espnNames = Object.keys(allStats)
-  onProgress?.(`Processed ${gamesProcessed} completed games, found ${espnNames.length} players with stats`)
+  onProgress?.(`Processed ${gamesProcessed} game(s), found ${espnNames.length} players with stats`)
 
-  if (espnNames.length === 0) {
-    return {
-      matched: [],
-      unmatched: [],
-      message: 'No completed tournament games found yet — ESPN may not have box scores available. Try again in a few minutes after games finish.',
-    }
-  }
+  // Step 2: Auto-eliminate losers
+  await autoEliminateLosers(completedEvents, onProgress)
 
-  // Get all drafted players
+  // Step 3: Match and write scores
   const { data: draftedPlayers, error } = await supabase
     .from('players')
     .select('id, name')
@@ -260,14 +243,13 @@ export async function syncTournamentScores(onProgress) {
 
   if (error) throw new Error('DB error: ' + error.message)
 
-  onProgress?.(`Matching ${draftedPlayers.length} drafted players against ESPN data...`)
+  onProgress?.(`Matching ${draftedPlayers.length} drafted players...`)
 
   const matched = []
   const unmatched = []
 
   for (const player of draftedPlayers) {
     const espnName = findBestNameMatch(player.name, espnNames)
-
     if (espnName) {
       for (const { roundName, points } of allStats[espnName]) {
         await supabase.from('player_scores').upsert(
