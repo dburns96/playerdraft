@@ -77,28 +77,28 @@ function DrafterCard({ sim, drafter, currentPts, isExpanded, onToggle }) {
           </div>
         </div>
 
-        <div className="flex flex-wrap gap-4 sm:gap-6 items-center">
+        <div className="flex items-center gap-4">
           {/* Current pts */}
-          <div className="text-center">
+          <div className="text-center w-20 shrink-0">
             <div className="text-2xl font-black text-orange-500">{currentPts}</div>
             <div className="text-xs text-slate-400">current pts</div>
           </div>
           {/* Projected total */}
-          <div className="text-center">
+          <div className="text-center w-20 shrink-0">
             <div className="text-2xl font-black text-blue-600">{sim.expected_total_pts}</div>
             <div className="text-xs text-slate-400">proj total</div>
           </div>
           {/* Range */}
-          <div className="text-center hidden md:block">
+          <div className="text-center w-24 shrink-0 hidden md:block">
             <div className="text-sm font-semibold text-slate-600">{sim.p10}–{sim.p90}</div>
             <div className="text-xs text-slate-400">p10–p90 range</div>
           </div>
           {/* Win % */}
-          <div className="min-w-32">
+          <div className="w-36 shrink-0">
             <div className="text-xs text-slate-400 mb-1">win probability</div>
             <WinProbBar pct={sim.win_pct} color={winColor} />
           </div>
-          <span className="text-slate-300 text-lg">{isExpanded ? '▲' : '▼'}</span>
+          <span className="text-slate-300 text-lg w-4 shrink-0">{isExpanded ? '▲' : '▼'}</span>
         </div>
       </button>
 
