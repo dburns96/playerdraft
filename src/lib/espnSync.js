@@ -95,9 +95,7 @@ function parsePlayerPointsFromSummary(summary, roundName) {
 function findBestNameMatch(ourName, espnNames) {
   const norm = normalizeName(ourName)
   const parts = norm.split(' ')
-  const SUFFIXES = new Set(["jr","sr","ii","iii","iv"]);
-  const cleanParts = parts.filter(p => !SUFFIXES.has(p));
-  const lastName = cleanParts[cleanParts.length - 1]
+  const lastName = parts[parts.length - 1]
   const firstName = parts[0]
 
   // 1. Exact normalized match
@@ -120,6 +118,52 @@ function findBestNameMatch(ourName, espnNames) {
   if (lastNameMatches.length === 1) return lastNameMatches[0]
 
   return null
+}
+
+async function autoEliminateLosers(events, onProgress) {
+  // Build a set of team names that lost completed tournament games
+  const losingTeams = new Set()
+
+  for (const event of events) {
+    if (!event.status?.type?.completed) continue
+    const competitors = event.competitions?.[0]?.competitors || []
+    for (const c of competitors) {
+      if (c.winner === false) {
+        const name = c.team?.displayName || c.team?.name || ''
+        if (name) losingTeams.add(name.toLowerCase())
+      }
+    }
+  }
+
+  if (losingTeams.size === 0) return
+
+  onProgress?.(`Checking eliminations for ${losingTeams.size} losing team(s)...`)
+
+  // Get all non-eliminated players with their team name
+  const { data: players } = await supabase
+    .from('players')
+    .select('id, name, team')
+    .eq('is_eliminated', false)
+    .not('drafter_id', 'is', null)
+
+  if (!players?.length) return
+
+  const toEliminate = players.filter(p => {
+    const team = p.team.toLowerCase()
+    // Check direct match or partial match against losing teams
+    for (const loser of losingTeams) {
+      if (loser.includes(team) || team.includes(loser.split(' ')[0])) return true
+    }
+    return false
+  })
+
+  if (toEliminate.length === 0) return
+
+  const ids = toEliminate.map(p => p.id)
+  await supabase.from('players').update({ is_eliminated: true }).in('id', ids)
+
+  const names = toEliminate.map(p => `${p.name} (${p.team})`).join(', ')
+  onProgress?.(`✓ Auto-eliminated ${toEliminate.length} player(s): ${names}`)
 }
 
 function todayStr() {
@@ -194,6 +238,8 @@ export async function syncTournamentScores(onProgress) {
       gamesProcessed++
     }
   }
+
+  await autoEliminateLosers(allCompletedEvents, onProgress)
 
   const espnNames = Object.keys(allStats)
   onProgress?.(`Processed ${gamesProcessed} completed games, found ${espnNames.length} players with stats`)

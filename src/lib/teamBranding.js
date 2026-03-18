@@ -56,6 +56,7 @@ const TEAM_BRANDING = {
   'Santa Clara':  { espnId: 2172, primary: '#862633', secondary: '#FFFFFF' },
   // ── 11-seeds ─────────────────────────────────────────────────────────────
   'South Florida':{ espnId: 58,   primary: '#006747', secondary: '#CFC493' },
+  'USF':          { espnId: 58,   primary: '#006747', secondary: '#CFC493' },
   'NC State':     { espnId: 152,  primary: '#CC0000', secondary: '#FFFFFF' },
   'VCU':          { espnId: 2670, primary: '#FFB300', secondary: '#000000' },
   'SMU':          { espnId: 2567, primary: '#0033A0', secondary: '#C8102E' },
