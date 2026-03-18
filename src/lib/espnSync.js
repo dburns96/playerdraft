@@ -95,7 +95,9 @@ function parsePlayerPointsFromSummary(summary, roundName) {
 function findBestNameMatch(ourName, espnNames) {
   const norm = normalizeName(ourName)
   const parts = norm.split(' ')
-  const lastName = parts[parts.length - 1]
+  const SUFFIXES = new Set(["jr","sr","ii","iii","iv"]);
+  const cleanParts = parts.filter(p => !SUFFIXES.has(p));
+  const lastName = cleanParts[cleanParts.length - 1]
   const firstName = parts[0]
 
   // 1. Exact normalized match
