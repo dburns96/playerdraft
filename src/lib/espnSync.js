@@ -21,15 +21,33 @@ const ESPN_ROUND_MAP = [
   { patterns: ['national championship', 'championship', 'title game', 'final'],    round: 'Championship' },
 ]
 
-function detectRoundName(event) {
-  // Check multiple ESPN fields where round info might live
+// Date-based fallback: we know exactly which dates = which rounds
+const DATE_TO_ROUND = {
+  '20260317': 'Play-In',
+  '20260318': 'Play-In',
+  '20260319': 'Round of 64',
+  '20260320': 'Round of 64',
+  '20260321': 'Round of 32',
+  '20260322': 'Round of 32',
+  '20260326': 'Sweet Sixteen',
+  '20260327': 'Sweet Sixteen',
+  '20260328': 'Elite Eight',
+  '20260329': 'Elite Eight',
+  '20260404': 'Final Four',
+  '20260406': 'Championship',
+}
+
+function detectRoundName(event, dateStr) {
+  // First try ESPN fields
+  const comp = event.competitions?.[0]
   const candidates = [
     event.notes?.[0]?.headline,
+    comp?.notes?.[0]?.headline,
+    comp?.notes?.[0]?.type,
     event.season?.slug,
-    event.seasonType?.name,
     event.name,
     event.shortName,
-    event.season?.type?.name,
+    comp?.type?.text,
   ].filter(Boolean).map(s => s.toLowerCase())
 
   for (const { patterns, round } of ESPN_ROUND_MAP) {
@@ -39,7 +57,9 @@ function detectRoundName(event) {
       }
     }
   }
-  return null
+
+  // Fallback: infer round from date — reliable since we only query tournament dates
+  return DATE_TO_ROUND[dateStr] || null
 }
 
 function normalizeName(name) {
@@ -147,11 +167,16 @@ export async function syncTournamentScores(onProgress) {
       const isCompleted = event.status?.type?.completed
       if (!isCompleted) continue
 
-      const roundName = detectRoundName(event)
+      const roundName = detectRoundName(event, dateStr)
 
       // Log what we see so you can debug mismatches
-      const headline = event.notes?.[0]?.headline || '(no headline)'
-      onProgress?.(`  ✓ ${event.shortName || event.id} → round: "${roundName || '?'}" (ESPN said: "${headline}")`)
+      const comp0 = event.competitions?.[0]
+      const headline = event.notes?.[0]?.headline
+        || comp0?.notes?.[0]?.headline
+        || comp0?.type?.text
+        || event.name
+        || '(no usable field)'
+      onProgress?.(`  ✓ ${event.shortName || event.id} → round: "${roundName || '?'}" (ESPN: "${headline}")`)
 
       if (!roundName) continue
 
