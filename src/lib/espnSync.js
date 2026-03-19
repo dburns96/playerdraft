@@ -52,29 +52,36 @@ function teamsMatch(ourTeam, espnTeam) {
   return a === b || a.includes(b) || b.includes(a)
 }
 
+function findByEspnId(espnPlayerId, allStats) {
+  if (!espnPlayerId) return null
+  for (const [name, stats] of Object.entries(allStats)) {
+    if (stats.some(s => s.espnId === espnPlayerId)) return name
+  }
+  return null
+}
+
 function findBestNameMatch(ourName, ourTeam, allStats) {
   const our = extractParts(ourName)
   const espnNames = Object.keys(allStats)
 
-  // 1. Exact name + exact team
+  // 1. Exact name + team
   for (const en of espnNames) {
     if (extractParts(en).full === our.full && teamsMatch(ourTeam, allStats[en][0]?.espnTeam)) return en
   }
 
-  // 2. Exact name, any team (handles minor team name mismatches)
+  // 2. Exact name, any team
   for (const en of espnNames) {
     if (extractParts(en).full === our.full) return en
   }
 
-  // 3. First initial + last name + team — all three must match
+  // 3. First initial + last name + team
   for (const en of espnNames) {
     const ep = extractParts(en)
     if (ep.last === our.last && our.first.length > 0 && ep.first[0] === our.first[0]
         && teamsMatch(ourTeam, allStats[en][0]?.espnTeam)) return en
   }
 
-  // 4. First initial + last name only — last resort, no team confirmation
-  //    Only used when team data is missing from ESPN response
+  // 4. First initial + last name, no team data available
   for (const en of espnNames) {
     const ep = extractParts(en)
     if (ep.last === our.last && our.first.length > 0 && ep.first[0] === our.first[0]
@@ -128,10 +135,11 @@ function parsePlayerPoints(summary, roundName) {
       if (ptsIndex === -1) continue
       for (const athlete of statGroup.athletes || []) {
         const name = athlete.athlete?.displayName
+        const espnId = athlete.athlete?.id ? String(athlete.athlete.id) : null
         const pts = parseInt(athlete.stats?.[ptsIndex], 10)
         if (name && !isNaN(pts)) {
           if (!results[name] || pts > results[name].points) {
-            results[name] = { points: pts, roundName, espnTeam: espnTeamName }
+            results[name] = { points: pts, roundName, espnTeam: espnTeamName, espnId }
           }
         }
       }
@@ -265,7 +273,7 @@ export async function syncTournamentScores(onProgress) {
   // Step 3: Match and write scores
   const { data: draftedPlayers, error } = await supabase
     .from('players')
-    .select('id, name')
+    .select('id, name, team, espn_player_id')
     .not('drafter_id', 'is', null)
 
   if (error) throw new Error('DB error: ' + error.message)
@@ -276,15 +284,36 @@ export async function syncTournamentScores(onProgress) {
   const unmatched = []
 
   for (const player of draftedPlayers) {
-    const espnName = findBestNameMatch(player.name, player.team, allStats)
+    // Try ID match first (fast, reliable, no ambiguity)
+    let espnName = player.espn_player_id
+      ? findByEspnId(player.espn_player_id, allStats)
+      : null
+
+    const matchedByName = !espnName
+    if (!espnName) {
+      espnName = findBestNameMatch(player.name, player.team, allStats)
+    }
+
     if (espnName) {
+      // Save ESPN ID back to DB if we matched by name and don't have it yet
+      if (matchedByName && !player.espn_player_id) {
+        const espnId = allStats[espnName]?.[0]?.espnId
+        if (espnId) {
+          await supabase.from('players').update({ espn_player_id: espnId }).eq('id', player.id)
+        }
+      }
+
       for (const { roundName, points } of allStats[espnName]) {
         await supabase.from('player_scores').upsert(
           { player_id: player.id, round_name: roundName, points, updated_at: new Date().toISOString() },
           { onConflict: 'player_id,round_name' }
         )
       }
-      matched.push({ ourName: player.name, espnName })
+      matched.push({
+        ourName: player.name,
+        espnName,
+        method: matchedByName ? 'name' : 'id',
+      })
     } else {
       unmatched.push(player.name)
     }
