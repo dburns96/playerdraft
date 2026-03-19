@@ -42,14 +42,37 @@ function extractParts(name) {
   }
 }
 
-// Normalize team names for fuzzy comparison
+// Improved Team Matching Logic
 function teamsMatch(ourTeam, espnTeam) {
   if (!ourTeam || !espnTeam) return false
   const normalize = s => s.toLowerCase().replace(/[^a-z0-9]/g, '')
   const a = normalize(ourTeam)
   const b = normalize(espnTeam)
-  // Direct match or one contains the other (handles "UConn" vs "Connecticut Huskies")
-  return a === b || a.includes(b) || b.includes(a)
+
+  // 1. Direct match
+  if (a === b) return true
+
+  // 2. Handle known common aliases
+  const aliases = {
+    'uconn': 'connecticut',
+    'ncstate': 'northcarolinastate',
+    'pennst': 'pennsylvania-state',
+    'ohiost': 'ohio-state'
+  }
+  if (aliases[a] === b || aliases[b] === a) return true
+
+  // 3. Fuzzy match (one contains the other)
+  if (a.includes(b) || b.includes(a)) {
+    // CRITICAL FIX: Prevent "Florida" matching "Florida A&M" or "Michigan" matching "Michigan State"
+    const isStateMismatch = (a.includes('state') !== b.includes('state') || a.includes('st') !== b.includes('st'))
+    const isAmMismatch = (a.includes('am') !== b.includes('am'))
+    
+    if (isStateMismatch || isAmMismatch) return false
+    
+    return true
+  }
+
+  return false
 }
 
 function findByEspnId(espnPlayerId, espnIdMap) {
@@ -64,28 +87,18 @@ function findBestNameMatch(ourName, ourTeam, allStats) {
   const our = extractParts(ourName)
   const espnNames = Object.keys(allStats)
 
-  // 1. Exact name + team
   for (const en of espnNames) {
     if (extractParts(en).full === our.full && teamsMatch(ourTeam, allStats[en][0]?.espnTeam)) return en
   }
 
-  // 2. Exact name, any team
   for (const en of espnNames) {
     if (extractParts(en).full === our.full) return en
   }
 
-  // 3. First initial + last name + team
   for (const en of espnNames) {
     const ep = extractParts(en)
     if (ep.last === our.last && our.first.length > 0 && ep.first[0] === our.first[0]
         && teamsMatch(ourTeam, allStats[en][0]?.espnTeam)) return en
-  }
-
-  // 4. First initial + last name, no team data available
-  for (const en of espnNames) {
-    const ep = extractParts(en)
-    if (ep.last === our.last && our.first.length > 0 && ep.first[0] === our.first[0]
-        && !allStats[en][0]?.espnTeam) return en
   }
 
   return null
@@ -93,25 +106,17 @@ function findBestNameMatch(ourName, ourTeam, allStats) {
 
 function isTournamentGame(event) {
   const comp = event.competitions?.[0]
-  // NCAA tournament games are always played at neutral sites
   if (!comp?.neutralSite) return false
-  // Season type 3 = postseason (NCAA tournament)
   if (event.season?.type === 3 || event.season?.type === '3') return true
-  // Check groups for NCAA tournament identifier
   const groupName = (event.groups?.name || event.groups?.[0]?.name || '').toLowerCase()
   if (groupName.includes('ncaa') || groupName.includes('tournament')) return true
-  // Check notes/headlines for tournament language
   const headline = (event.notes?.[0]?.headline || comp?.notes?.[0]?.headline || '').toLowerCase()
   if (headline.includes('ncaa') || headline.includes('tournament') ||
-      headline.includes('first four') || headline.includes('first round') ||
-      headline.includes('second round') || headline.includes('sweet') ||
-      headline.includes('elite') || headline.includes('final four') ||
-      headline.includes('championship')) return true
+      headline.includes('first four') || headline.includes('first round')) return true
   return false
 }
 
 function detectRoundName(event, dateStr) {
-  // Try ESPN text fields first
   const comp = event.competitions?.[0]
   const candidates = [
     event.notes?.[0]?.headline,
@@ -122,13 +127,13 @@ function detectRoundName(event, dateStr) {
   ].filter(Boolean).map(s => s.toLowerCase())
 
   const ESPN_ROUND_MAP = [
-    { patterns: ['first four', 'play-in', 'opening round'], round: 'Play-In' },
-    { patterns: ['first round', 'round of 64'],             round: 'Round of 64' },
-    { patterns: ['second round', 'round of 32'],            round: 'Round of 32' },
-    { patterns: ['sweet sixteen', 'sweet 16'],              round: 'Sweet Sixteen' },
-    { patterns: ['elite eight', 'elite 8'],                 round: 'Elite Eight' },
-    { patterns: ['final four'],                             round: 'Final Four' },
-    { patterns: ['national championship', 'championship'],  round: 'Championship' },
+    { patterns: ['first four', 'play-in'],       round: 'Play-In' },
+    { patterns: ['first round', 'round of 64'],  round: 'Round of 64' },
+    { patterns: ['second round', 'round of 32'], round: 'Round of 32' },
+    { patterns: ['sweet sixteen', 'sweet 16'],   round: 'Sweet Sixteen' },
+    { patterns: ['elite eight', 'elite 8'],      round: 'Elite Eight' },
+    { patterns: ['final four'],                  round: 'Final Four' },
+    { patterns: ['championship'],                round: 'Championship' },
   ]
 
   for (const { patterns, round } of ESPN_ROUND_MAP) {
@@ -139,11 +144,9 @@ function detectRoundName(event, dateStr) {
     }
   }
 
-  // Date-based fallback — ONLY use if we can confirm it's actually a tournament game
   if (isTournamentGame(event)) {
     return DATE_TO_ROUND[dateStr] || null
   }
-
   return null
 }
 
@@ -195,21 +198,17 @@ async function fetchGameSummary(eventId) {
 async function autoEliminateLosers(completedEvents, onProgress) {
   const losingTeams = new Set()
   for (const event of completedEvents) {
-    // Only eliminate based on tournament games — skip regular season / conf tournament
-    // We verify by checking that the round was successfully identified as a tournament round
     if (!event._tournamentRound) continue
-
     const competitors = event.competitions?.[0]?.competitors || []
     for (const c of competitors) {
       if (c.winner === false) {
         const name = c.team?.displayName || c.team?.name || ''
-        if (name) losingTeams.add(name.toLowerCase())
+        if (name) losingTeams.add(name)
       }
     }
   }
 
   if (losingTeams.size === 0) return
-  onProgress?.(`Checking eliminations against ${losingTeams.size} team(s) that lost...`)
 
   const { data: players } = await supabase
     .from('players')
@@ -219,17 +218,13 @@ async function autoEliminateLosers(completedEvents, onProgress) {
   if (!players?.length) return
 
   const toEliminate = players.filter(p => {
-    const team = p.team.toLowerCase()
     for (const loser of losingTeams) {
-      if (loser.includes(team) || team.includes(loser.split(' ')[0])) return true
+      if (teamsMatch(p.team, loser)) return true
     }
     return false
   })
 
-  if (toEliminate.length === 0) {
-    onProgress?.('No new eliminations detected.')
-    return
-  }
+  if (toEliminate.length === 0) return
 
   const ids = toEliminate.map(p => p.id)
   await supabase.from('players').update({ is_eliminated: true }).in('id', ids)
@@ -250,27 +245,20 @@ export async function syncTournamentScores(onProgress) {
 
   onProgress?.(`Checking ${datesToFetch.length} tournament date(s)...`)
 
-  // Step 1: Collect all completed events and player stats
-  const allStats = {}       // espnName -> [{ points, roundName, espnTeam }]
-  const espnIdMap = {}      // espnName -> espnId (stored separately for reliability)
+  const allStats = {}
+  const espnIdMap = {}
   const completedEvents = []
   let gamesProcessed = 0
 
   for (const dateStr of datesToFetch) {
     const events = await fetchEventsForDate(dateStr)
-    onProgress?.(`${dateStr}: found ${events.length} event(s)`)
-
     for (const event of events) {
       if (!event.status?.type?.completed) continue
-
       const roundName = detectRoundName(event, dateStr)
-      const label = event.shortName || event.id
-      onProgress?.(`  ✓ ${label} → ${roundName || '?'}`)
-
-      event._tournamentRound = roundName || null
-      completedEvents.push(event)
-
       if (!roundName) continue
+
+      event._tournamentRound = roundName
+      completedEvents.push(event)
 
       const summary = await fetchGameSummary(event.id)
       if (!summary) continue
@@ -281,21 +269,14 @@ export async function syncTournamentScores(onProgress) {
         if (!allStats[name].some(s => s.roundName === stats.roundName)) {
           allStats[name].push({ points: stats.points, roundName: stats.roundName, espnTeam: stats.espnTeam })
         }
-        // Always store espnId in the dedicated map — overwrite is fine, ID never changes
         if (stats.espnId) espnIdMap[name] = stats.espnId
       }
       gamesProcessed++
     }
   }
 
-  const espnNames = Object.keys(allStats)
-  onProgress?.(`Processed ${gamesProcessed} game(s), found ${espnNames.length} players with stats`)
-  // Note: espnNames still used for progress reporting above
-
-  // Step 2: Auto-eliminate losers
   await autoEliminateLosers(completedEvents, onProgress)
 
-  // Step 3: Match and write scores
   const { data: draftedPlayers, error } = await supabase
     .from('players')
     .select('id, name, team, espn_player_id')
@@ -303,13 +284,10 @@ export async function syncTournamentScores(onProgress) {
 
   if (error) throw new Error('DB error: ' + error.message)
 
-  onProgress?.(`Matching ${draftedPlayers.length} drafted players...`)
-
   const matched = []
   const unmatched = []
 
   for (const player of draftedPlayers) {
-    // Try ID match first (fast, reliable, no ambiguity)
     let espnName = player.espn_player_id
       ? findByEspnId(player.espn_player_id, espnIdMap)
       : null
@@ -320,13 +298,9 @@ export async function syncTournamentScores(onProgress) {
     }
 
     if (espnName) {
-      // Save ESPN ID back to DB if we matched by name and don't have it yet
       if (matchedByName && !player.espn_player_id) {
         const espnId = espnIdMap[espnName]
-        if (espnId) {
-          await supabase.from('players').update({ espn_player_id: espnId }).eq('id', player.id)
-          onProgress?.(`  → Saved ESPN ID ${espnId} for ${player.name}`)
-        }
+        if (espnId) await supabase.from('players').update({ espn_player_id: espnId }).eq('id', player.id)
       }
 
       for (const { roundName, points } of allStats[espnName]) {
@@ -335,17 +309,12 @@ export async function syncTournamentScores(onProgress) {
           { onConflict: 'player_id,round_name' }
         )
       }
-      matched.push({
-        ourName: player.name,
-        espnName,
-        method: matchedByName ? 'name' : 'id',
-      })
+      matched.push({ ourName: player.name, espnName, method: matchedByName ? 'name' : 'id' })
     } else {
       unmatched.push(player.name)
     }
   }
 
   await supabase.from('settings').upsert({ key: 'last_espn_sync', value: new Date().toISOString() })
-
   return { matched, unmatched }
 }
