@@ -91,6 +91,25 @@ function findBestNameMatch(ourName, ourTeam, allStats) {
   return null
 }
 
+function isTournamentGame(event) {
+  const comp = event.competitions?.[0]
+  // NCAA tournament games are always played at neutral sites
+  if (!comp?.neutralSite) return false
+  // Season type 3 = postseason (NCAA tournament)
+  if (event.season?.type === 3 || event.season?.type === '3') return true
+  // Check groups for NCAA tournament identifier
+  const groupName = (event.groups?.name || event.groups?.[0]?.name || '').toLowerCase()
+  if (groupName.includes('ncaa') || groupName.includes('tournament')) return true
+  // Check notes/headlines for tournament language
+  const headline = (event.notes?.[0]?.headline || comp?.notes?.[0]?.headline || '').toLowerCase()
+  if (headline.includes('ncaa') || headline.includes('tournament') ||
+      headline.includes('first four') || headline.includes('first round') ||
+      headline.includes('second round') || headline.includes('sweet') ||
+      headline.includes('elite') || headline.includes('final four') ||
+      headline.includes('championship')) return true
+  return false
+}
+
 function detectRoundName(event, dateStr) {
   // Try ESPN text fields first
   const comp = event.competitions?.[0]
@@ -120,8 +139,12 @@ function detectRoundName(event, dateStr) {
     }
   }
 
-  // Fallback: infer from date — reliable since we only query known tournament dates
-  return DATE_TO_ROUND[dateStr] || null
+  // Date-based fallback — ONLY use if we can confirm it's actually a tournament game
+  if (isTournamentGame(event)) {
+    return DATE_TO_ROUND[dateStr] || null
+  }
+
+  return null
 }
 
 function parsePlayerPoints(summary, roundName) {
