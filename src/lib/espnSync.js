@@ -52,10 +52,10 @@ function teamsMatch(ourTeam, espnTeam) {
   return a === b || a.includes(b) || b.includes(a)
 }
 
-function findByEspnId(espnPlayerId, allStats) {
+function findByEspnId(espnPlayerId, espnIdMap) {
   if (!espnPlayerId) return null
-  for (const [name, stats] of Object.entries(allStats)) {
-    if (stats.some(s => s.espnId === espnPlayerId)) return name
+  for (const [name, id] of Object.entries(espnIdMap)) {
+    if (id === espnPlayerId) return name
   }
   return null
 }
@@ -228,7 +228,8 @@ export async function syncTournamentScores(onProgress) {
   onProgress?.(`Checking ${datesToFetch.length} tournament date(s)...`)
 
   // Step 1: Collect all completed events and player stats
-  const allStats = {}
+  const allStats = {}       // espnName -> [{ points, roundName, espnTeam }]
+  const espnIdMap = {}      // espnName -> espnId (stored separately for reliability)
   const completedEvents = []
   let gamesProcessed = 0
 
@@ -243,7 +244,6 @@ export async function syncTournamentScores(onProgress) {
       const label = event.shortName || event.id
       onProgress?.(`  ✓ ${label} → ${roundName || '?'}`)
 
-      // Tag with tournament round so auto-elimination only fires on real tournament games
       event._tournamentRound = roundName || null
       completedEvents.push(event)
 
@@ -256,8 +256,10 @@ export async function syncTournamentScores(onProgress) {
       for (const [name, stats] of Object.entries(gamePlayers)) {
         if (!allStats[name]) allStats[name] = []
         if (!allStats[name].some(s => s.roundName === stats.roundName)) {
-          allStats[name].push(stats)
+          allStats[name].push({ points: stats.points, roundName: stats.roundName, espnTeam: stats.espnTeam })
         }
+        // Always store espnId in the dedicated map — overwrite is fine, ID never changes
+        if (stats.espnId) espnIdMap[name] = stats.espnId
       }
       gamesProcessed++
     }
@@ -286,7 +288,7 @@ export async function syncTournamentScores(onProgress) {
   for (const player of draftedPlayers) {
     // Try ID match first (fast, reliable, no ambiguity)
     let espnName = player.espn_player_id
-      ? findByEspnId(player.espn_player_id, allStats)
+      ? findByEspnId(player.espn_player_id, espnIdMap)
       : null
 
     const matchedByName = !espnName
@@ -297,9 +299,10 @@ export async function syncTournamentScores(onProgress) {
     if (espnName) {
       // Save ESPN ID back to DB if we matched by name and don't have it yet
       if (matchedByName && !player.espn_player_id) {
-        const espnId = allStats[espnName]?.[0]?.espnId
+        const espnId = espnIdMap[espnName]
         if (espnId) {
           await supabase.from('players').update({ espn_player_id: espnId }).eq('id', player.id)
+          onProgress?.(`  → Saved ESPN ID ${espnId} for ${player.name}`)
         }
       }
 
