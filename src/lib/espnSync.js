@@ -164,6 +164,10 @@ async function fetchGameSummary(eventId) {
 async function autoEliminateLosers(completedEvents, onProgress) {
   const losingTeams = new Set()
   for (const event of completedEvents) {
+    // Only eliminate based on tournament games — skip regular season / conf tournament
+    // We verify by checking that the round was successfully identified as a tournament round
+    if (!event._tournamentRound) continue
+
     const competitors = event.competitions?.[0]?.competitors || []
     for (const c of competitors) {
       if (c.winner === false) {
@@ -227,11 +231,13 @@ export async function syncTournamentScores(onProgress) {
     for (const event of events) {
       if (!event.status?.type?.completed) continue
 
-      completedEvents.push(event)
-
       const roundName = detectRoundName(event, dateStr)
       const label = event.shortName || event.id
       onProgress?.(`  ✓ ${label} → ${roundName || '?'}`)
+
+      // Tag with tournament round so auto-elimination only fires on real tournament games
+      event._tournamentRound = roundName || null
+      completedEvents.push(event)
 
       if (!roundName) continue
 
