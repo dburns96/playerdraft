@@ -42,24 +42,43 @@ function extractParts(name) {
   }
 }
 
-function findBestNameMatch(ourName, espnNames) {
-  const our = extractParts(ourName)
+// Normalize team names for fuzzy comparison
+function teamsMatch(ourTeam, espnTeam) {
+  if (!ourTeam || !espnTeam) return false
+  const normalize = s => s.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const a = normalize(ourTeam)
+  const b = normalize(espnTeam)
+  // Direct match or one contains the other (handles "UConn" vs "Connecticut Huskies")
+  return a === b || a.includes(b) || b.includes(a)
+}
 
-  // 1. Exact normalized match (suffixes stripped)
+function findBestNameMatch(ourName, ourTeam, allStats) {
+  const our = extractParts(ourName)
+  const espnNames = Object.keys(allStats)
+
+  // 1. Exact name + exact team
+  for (const en of espnNames) {
+    if (extractParts(en).full === our.full && teamsMatch(ourTeam, allStats[en][0]?.espnTeam)) return en
+  }
+
+  // 2. Exact name, any team (handles minor team name mismatches)
   for (const en of espnNames) {
     if (extractParts(en).full === our.full) return en
   }
 
-  // 2. Last name + first initial
+  // 3. First initial + last name + team — all three must match
   for (const en of espnNames) {
     const ep = extractParts(en)
-    if (ep.last === our.last && ep.first[0] === our.first[0]) return en
+    if (ep.last === our.last && our.first.length > 0 && ep.first[0] === our.first[0]
+        && teamsMatch(ourTeam, allStats[en][0]?.espnTeam)) return en
   }
 
-  // 3. Last name only — only if unique and at least 4 chars (avoids suffix collisions)
-  if (our.last.length >= 4) {
-    const matches = espnNames.filter(en => extractParts(en).last === our.last)
-    if (matches.length === 1) return matches[0]
+  // 4. First initial + last name only — last resort, no team confirmation
+  //    Only used when team data is missing from ESPN response
+  for (const en of espnNames) {
+    const ep = extractParts(en)
+    if (ep.last === our.last && our.first.length > 0 && ep.first[0] === our.first[0]
+        && !allStats[en][0]?.espnTeam) return en
   }
 
   return null
@@ -103,6 +122,7 @@ function parsePlayerPoints(summary, roundName) {
   if (!summary?.boxscore?.players) return results
 
   for (const teamData of summary.boxscore.players) {
+    const espnTeamName = teamData.team?.displayName || teamData.team?.name || ''
     for (const statGroup of teamData.statistics || []) {
       const ptsIndex = (statGroup.names || []).indexOf('PTS')
       if (ptsIndex === -1) continue
@@ -111,7 +131,7 @@ function parsePlayerPoints(summary, roundName) {
         const pts = parseInt(athlete.stats?.[ptsIndex], 10)
         if (name && !isNaN(pts)) {
           if (!results[name] || pts > results[name].points) {
-            results[name] = { points: pts, roundName }
+            results[name] = { points: pts, roundName, espnTeam: espnTeamName }
           }
         }
       }
@@ -231,6 +251,7 @@ export async function syncTournamentScores(onProgress) {
 
   const espnNames = Object.keys(allStats)
   onProgress?.(`Processed ${gamesProcessed} game(s), found ${espnNames.length} players with stats`)
+  // Note: espnNames still used for progress reporting above
 
   // Step 2: Auto-eliminate losers
   await autoEliminateLosers(completedEvents, onProgress)
@@ -249,7 +270,7 @@ export async function syncTournamentScores(onProgress) {
   const unmatched = []
 
   for (const player of draftedPlayers) {
-    const espnName = findBestNameMatch(player.name, espnNames)
+    const espnName = findBestNameMatch(player.name, player.team, allStats)
     if (espnName) {
       for (const { roundName, points } of allStats[espnName]) {
         await supabase.from('player_scores').upsert(
