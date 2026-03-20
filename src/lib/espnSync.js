@@ -1,47 +1,38 @@
 import { supabase } from './supabase.js'
 
-const TOURNAMENT_START_DATE = '20260317'; // Tuesday, March 17
-const TOURNAMENT_DATES = [
-  '20260317', '20260318', 
-  '20260319', '20260320', 
-  '20260321', '20260322', 
-  '20260326', '20260327', 
-  '20260328', '20260329', 
-  '20260404', '20260406'
-]
+const TOURNAMENT_DATES = ['20260317', '20260318', '20260319', '20260320', '20260321', '20260322']
 
 const DATE_TO_ROUND = {
   '20260317': 'Play-In', '20260318': 'Play-In',
   '20260319': 'Round of 64', '20260320': 'Round of 64',
-  '20260321': 'Round of 32', '20260322': 'Round of 32',
-  '20260326': 'Sweet Sixteen', '20260327': 'Sweet Sixteen',
-  '20260328': 'Elite Eight', '20260329': 'Elite Eight',
-  '20260404': 'Final Four', '20260406': 'Championship'
+  '20260321': 'Round of 32', '20260322': 'Round of 32'
 }
 
 async function autoEliminateLosers(completedEvents, onProgress) {
   const losingTeamIds = new Set();
   
   for (const event of completedEvents) {
-    // 1. MUST be officially completed
-    if (event.status?.type?.completed !== true) continue;
+    // LAYER 1: League & Status Check
+    // League "50" is Men's College Basketball. 
+    // Status name "STATUS_FINAL" ensures the game is actually over.
+    if (event.status?.type?.name !== 'STATUS_FINAL') continue;
     
-    // 2. Date Guard: Only process games from the official tourney start
-    const eventDate = event.date.slice(0, 10).replace(/-/g, '');
-    if (eventDate < TOURNAMENT_START_DATE) continue;
+    // LAYER 2: Tournament Only
+    // Season type 3 is Postseason. Headline check prevents NIT/CBI leaks.
+    const headline = (event.notes?.[0]?.headline || "").toLowerCase();
+    if (event.season?.type !== 3 && !headline.includes("ncaa")) continue;
 
     const competitors = event.competitions?.[0]?.competitors || [];
     const team1 = competitors[0];
     const team2 = competitors[1];
-
     if (!team1 || !team2) continue;
 
-    // 3. SCORE CHECK: Arizona Protection
-    // Only eliminate if the game is Final AND the score isn't 0-0
+    // LAYER 3: The Score Lock
+    // A team cannot lose if the game score is 0-0.
     const score1 = parseInt(team1.score || "0");
     const score2 = parseInt(team2.score || "0");
 
-    if (score1 > 0 || score2 > 0) {
+    if (score1 > 0 && score2 > 0) {
       if (team1.winner === false && score1 < score2) losingTeamIds.add(String(team1.team.id));
       if (team2.winner === false && score2 < score1) losingTeamIds.add(String(team2.team.id));
     }
@@ -57,31 +48,29 @@ async function autoEliminateLosers(completedEvents, onProgress) {
 
   if (!players || players.length === 0) return;
 
+  // Strict ID match to the "Loser Set" we just built
   const toEliminate = players.filter(p => losingTeamIds.has(String(p.espn_team_id)));
   if (toEliminate.length === 0) return;
 
-  const ids = toEliminate.map(p => p.id);
-  await supabase.from('players').update({ is_eliminated: true }).in('id', ids);
-  onProgress?.(`✓ Confirmed Eliminations: ${toEliminate.map(p => `${p.name} (${p.team})`).join(', ')}`);
+  await supabase.from('players').update({ is_eliminated: true }).in('id', toEliminate.map(p => p.id));
+  onProgress?.(`✓ Validated Eliminations: ${toEliminate.map(p => `${p.name} (${p.team})`).join(', ')}`);
 }
 
-// THIS IS THE MAIN EXPORT YOUR ADMIN PANEL NEEDS
 export async function syncTournamentScores(onProgress) {
   const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const datesToFetch = TOURNAMENT_DATES.filter(d => d <= todayStr);
   
   const allStats = {};
   const completedEvents = [];
-  const matched = [];
-  const unmatched = [];
 
   for (const dateStr of datesToFetch) {
+    // Explicitly call the Men's Basketball endpoint
     const res = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=${dateStr}&groups=100&limit=100`);
     const { events = [] } = await res.json();
 
     for (const event of events) {
       const eventDate = event.date.slice(0, 10).replace(/-/g, '');
-      const roundName = DATE_TO_ROUND[eventDate] || 'Postseason';
+      const roundName = DATE_TO_ROUND[eventDate] || 'Round of 64';
       
       if (event.status?.type?.completed) {
         event._tournamentRound = roundName;
@@ -90,17 +79,15 @@ export async function syncTournamentScores(onProgress) {
 
       const sumRes = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/summary?event=${event.id}`);
       const summary = await sumRes.json();
-
       summary.boxscore?.players?.forEach(team => {
         team.statistics?.forEach(group => {
           const ptsIdx = (group.names || []).indexOf('PTS');
           group.athletes?.forEach(ath => {
             const pts = parseInt(ath.stats?.[ptsIdx]);
             if (ath.athlete?.displayName && !isNaN(pts)) {
-              const pName = ath.athlete.displayName;
-              if (!allStats[pName]) allStats[pName] = [];
-              if (!allStats[pName].some(s => s.roundName === roundName)) {
-                allStats[pName].push({ points: pts, roundName });
+              if (!allStats[ath.athlete.displayName]) allStats[ath.athlete.displayName] = [];
+              if (!allStats[ath.athlete.displayName].some(s => s.roundName === roundName)) {
+                allStats[ath.athlete.displayName].push({ points: pts, roundName });
               }
             }
           });
@@ -109,10 +96,8 @@ export async function syncTournamentScores(onProgress) {
     }
   }
 
-  // Run the ID-based elimination
   await autoEliminateLosers(completedEvents, onProgress);
 
-  // Sync Score Points
   const { data: drafted } = await supabase.from('players').select('id, name, team').not('drafter_id', 'is', null);
   if (drafted) {
     for (const p of drafted) {
@@ -124,11 +109,8 @@ export async function syncTournamentScores(onProgress) {
             { onConflict: 'player_id,round_name' }
           );
         }
-        matched.push(p.name);
-      } else { unmatched.push(p.name); }
+      }
     }
   }
-
-  await supabase.from('settings').upsert({ key: 'last_espn_sync', value: new Date().toISOString() });
-  return { matched, unmatched };
+  return { matched: [], unmatched: [] };
 }
