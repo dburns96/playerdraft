@@ -1,62 +1,49 @@
 import { supabase } from './supabase.js'
 
-// The only dates that matter for the NCAA Tournament
-const TOURNAMENT_DATES = [
-  '20260317', '20260318', // First Four (Play-In)
-  '20260319', '20260320', // Round of 64
-  '20260321', '20260322', // Round of 32
-]
-
-// STRICT: The round name is tied to the date of the game
-const DATE_TO_ROUND = {
-  '20260317': 'Play-In', '20260318': 'Play-In',
-  '20260319': 'Round of 64', '20260320': 'Round of 64',
-  '20260321': 'Round of 32', '20260322': 'Round of 32'
+// Official 2026 Tournament Dates
+const CALENDAR = {
+  '2026-03-17': 'Play-In', '2026-03-18': 'Play-In',
+  '2026-03-19': 'Round of 64', '2026-03-20': 'Round of 64',
+  '2026-03-21': 'Round of 32', '2026-03-22': 'Round of 32'
 }
 
 export async function syncTournamentScores(onProgress) {
-  const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const datesToFetch = TOURNAMENT_DATES.filter(d => d <= todayStr);
+  const dates = Object.keys(CALENDAR).filter(d => d <= new Date().toISOString().slice(0, 10)).map(d => d.replace(/-/g, ''));
   
-  const allStats = {}; 
+  const allStats = {}; // { playerName: [{ points, roundName, gameId }] }
   const losingTeamIds = new Set();
   const processedGameIds = new Set();
 
-  onProgress?.(`Starting Sync for ${datesToFetch.length} tournament days...`);
+  onProgress?.(`Syncing ${dates.length} days of verified tournament data...`);
 
-  for (const dateStr of datesToFetch) {
-    // group 50 = Men's Division I. 
-    const url = `https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=${dateStr}&groups=50&limit=300`;
+  for (const dateStr of dates) {
+    // group 100 = NCAA Men's Tournament only.
+    const url = `https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=${dateStr}&groups=100&limit=100`;
     const res = await fetch(url);
     const { events = [] } = await res.json();
 
     for (const event of events) {
       if (processedGameIds.has(event.id)) continue;
 
-      // 1. TEMPORAL GUARD: Ignore anything before March 17 (Blocks Arizona's March 14 conference loss)
-      const eventDateStr = event.date.slice(0, 10).replace(/-/g, '');
-      if (eventDateStr < '20260317') continue;
+      // GUARD 1: Temporal Fence (Ignore conference tourney carry-over)
+      const actualDate = event.date.slice(0, 10); // "2026-03-19"
+      if (actualDate < '2026-03-17') continue; 
 
-      // 2. TOURNAMENT GUARD: Only Men's Postseason (Season Type 3)
-      if (event.season?.type !== 3 && event.season?.type !== '3') continue;
-
-      const roundName = DATE_TO_ROUND[eventDateStr];
-      if (!roundName) continue; 
+      // GUARD 2: Round Lockdown (Round is based on Game Date, not Sync Date)
+      const roundName = CALENDAR[actualDate];
+      if (!roundName) continue;
 
       processedGameIds.add(event.id);
 
-      // 3. ELIMINATION ENGINE
-      // Only eliminate if game is STATUS_FINAL and scores are real
+      // GUARD 3: Elimination Lockdown (Only STATUS_FINAL and real winner/loser)
       if (event.status?.type?.name === 'STATUS_FINAL') {
         const competitors = event.competitions?.[0]?.competitors || [];
         for (const c of competitors) {
-          if (c.winner === false && c.team?.id) {
-            losingTeamIds.add(String(c.team.id));
-          }
+          if (c.winner === false && c.team?.id) losingTeamIds.add(String(c.team.id));
         }
       }
 
-      // 4. POINT ENGINE (Fetch summary for player boxscores)
+      // GUARD 4: Score Lockdown (Fetch player boxscores)
       const sumRes = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/summary?event=${event.id}`);
       const summary = await sumRes.json();
 
@@ -64,13 +51,12 @@ export async function syncTournamentScores(onProgress) {
         teamData.statistics?.forEach(statGroup => {
           const ptsIdx = (statGroup.names || []).indexOf('PTS');
           if (ptsIdx === -1) return;
-
           statGroup.athletes?.forEach(ath => {
             const pts = parseInt(ath.stats?.[ptsIdx]);
             if (ath.athlete?.displayName && !isNaN(pts)) {
               const pName = ath.athlete.displayName;
               if (!allStats[pName]) allStats[pName] = [];
-              // Unique score per player/round/game
+              // Prevent duplicate score entries (1 per game)
               if (!allStats[pName].some(s => s.gameId === event.id)) {
                 allStats[pName].push({ points: pts, roundName, gameId: event.id });
               }
@@ -81,38 +67,28 @@ export async function syncTournamentScores(onProgress) {
     }
   }
 
-  // --- DATABASE UPDATE PHASE ---
-
-  // Update Eliminations
+  // --- DATABASE UPDATE ---
   if (losingTeamIds.size > 0) {
-    const { data: activePlayers } = await supabase.from('players').select('id, team, espn_team_id').eq('is_eliminated', false).not('espn_team_id', 'is', null);
-    const toEliminate = activePlayers?.filter(p => losingTeamIds.has(String(p.espn_team_id))) || [];
+    const { data: players } = await supabase.from('players').select('id, team, espn_team_id').eq('is_eliminated', false).not('espn_team_id', 'is', null);
+    const toEliminate = players?.filter(p => losingTeamIds.has(String(p.espn_team_id))) || [];
     if (toEliminate.length > 0) {
       await supabase.from('players').update({ is_eliminated: true }).in('id', toEliminate.map(p => p.id));
-      onProgress?.(`✓ Eliminated ${toEliminate.length} players who lost.`);
+      onProgress?.(`✓ Confirmed Eliminations: ${toEliminate.map(p => `${p.name} (${p.team})`).join(', ')}`);
     }
   }
 
-  // Update Scores
   const { data: drafted } = await supabase.from('players').select('id, name').not('drafter_id', 'is', null);
-  let totalPointsSaved = 0;
   if (drafted) {
     for (const p of drafted) {
-      const playerGames = allStats[p.name];
-      if (playerGames) {
-        for (const game of playerGames) {
+      const stats = allStats[p.name];
+      if (stats) {
+        for (const s of stats) {
           await supabase.from('player_scores').upsert({
-            player_id: p.id,
-            round_name: game.roundName,
-            points: game.points,
-            updated_at: new Date().toISOString()
+            player_id: p.id, round_name: s.roundName, points: s.points, updated_at: new Date().toISOString()
           }, { onConflict: 'player_id,round_name' });
-          totalPointsSaved++;
         }
       }
     }
   }
-
-  onProgress?.(`✓ Sync complete. Saved ${totalPointsSaved} score entries.`);
   return { matched: [], unmatched: [] };
 }
