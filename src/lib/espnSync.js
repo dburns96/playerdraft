@@ -1,6 +1,6 @@
 import { supabase } from './supabase.js'
 
-// Strict Date-to-Round Mapping
+// Calendar for date-based fallback (adjusted for timezone in code)
 const TOURNAMENT_CALENDAR = {
   '2026-03-17': 'Play-In',
   '2026-03-18': 'Play-In',
@@ -8,29 +8,48 @@ const TOURNAMENT_CALENDAR = {
   '2026-03-20': 'Round of 64',
   '2026-03-21': 'Round of 32',
   '2026-03-22': 'Round of 32',
-  '2026-03-26': 'Sweet Sixteen',
-  '2026-03-27': 'Sweet Sixteen',
-  '2026-03-28': 'Elite Eight',
-  '2026-03-29': 'Elite Eight',
-  '2026-04-04': 'Final Four',
-  '2026-04-06': 'Championship'
+}
+
+/**
+ * Detects the correct tournament round name using ESPN headlines 
+ * with a timezone-aware date fallback.
+ */
+function getTargetRound(event) {
+  const headline = (event.notes?.[0]?.headline || "").toLowerCase();
+  const name = (event.name || "").toLowerCase();
+  const fullText = headline + " " + name;
+
+  if (fullText.includes('first four') || fullText.includes('play-in')) return 'Play-In';
+  if (fullText.includes('first round') || fullText.includes('round of 64')) return 'Round of 64';
+  if (fullText.includes('second round') || fullText.includes('round of 32')) return 'Round of 32';
+  if (fullText.includes('sweet 16') || fullText.includes('sweet sixteen')) return 'Sweet Sixteen';
+  if (fullText.includes('elite 8') || fullText.includes('elite eight')) return 'Elite Eight';
+  if (fullText.includes('final four')) return 'Final Four';
+  if (fullText.includes('championship')) return 'Championship';
+
+  // Fallback: Adjust UTC date to US Eastern Time (-5 hours) to handle late night games
+  const date = new Date(event.date);
+  date.setHours(date.getHours() - 5); 
+  const localDateStr = date.toISOString().slice(0, 10);
+  
+  return TOURNAMENT_CALENDAR[localDateStr] || null;
 }
 
 export async function syncTournamentScores(onProgress) {
-  // Get all tournament dates up to today
-  const allDates = Object.keys(TOURNAMENT_CALENDAR);
+  // Only sync dates that have actually occurred
   const todayISO = new Date().toISOString().slice(0, 10);
-  const datesToFetch = allDates.filter(date => date <= todayISO);
+  const activeDates = Object.keys(TOURNAMENT_CALENDAR)
+    .filter(date => date <= todayISO)
+    .map(date => date.replace(/-/g, ''));
 
-  const allStats = {}; // Format: { "Player Name": { "Round Name": points } }
+  const allStats = {}; // { "Player Name": { "Round": points } }
   const processedGameIds = new Set();
 
-  onProgress?.(`Fetching scores for ${datesToFetch.length} tournament days...`);
+  onProgress?.(`Starting score sync for ${activeDates.length} tournament days...`);
 
-  for (const dateStr of datesToFetch) {
-    const formattedDate = dateStr.replace(/-/g, '');
-    // Groups=100 limits results specifically to the NCAA Tournament
-    const url = `https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=${formattedDate}&groups=100&limit=100`;
+  for (const dateStr of activeDates) {
+    // Group 100 ensures we only get NCAA Tournament games
+    const url = `https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=${dateStr}&groups=100&limit=100`;
     
     try {
       const res = await fetch(url);
@@ -39,14 +58,12 @@ export async function syncTournamentScores(onProgress) {
       for (const event of events) {
         if (processedGameIds.has(event.id)) continue;
 
-        // Use the game's official date to determine the round column
-        const gameDate = event.date.slice(0, 10);
-        const roundName = TOURNAMENT_CALENDAR[gameDate];
+        const roundName = getTargetRound(event);
+        if (!roundName) continue; 
         
-        if (!roundName) continue; // Skip games outside the defined tournament window
         processedGameIds.add(event.id);
 
-        // Fetch detailed player boxscore
+        // Fetch the summary for the individual player boxscore
         const summaryUrl = `https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/summary?event=${event.id}`;
         const sumRes = await fetch(summaryUrl);
         const summary = await sumRes.json();
@@ -62,7 +79,7 @@ export async function syncTournamentScores(onProgress) {
 
               if (playerName && !isNaN(pts) && pts > 0) {
                 if (!allStats[playerName]) allStats[playerName] = {};
-                // Add points (handles players who might somehow play twice in a round, though rare)
+                // Sum points for the specific round (handles rare edge cases)
                 allStats[playerName][roundName] = (allStats[playerName][roundName] || 0) + pts;
               }
             });
@@ -70,34 +87,30 @@ export async function syncTournamentScores(onProgress) {
         });
       }
     } catch (err) {
-      console.error(`Failed to fetch data for ${dateStr}:`, err);
+      console.error(`Error fetching date ${dateStr}:`, err);
     }
   }
 
-  // --- Update Supabase ---
-  const { data: draftedPlayers } = await supabase
-    .from('players')
-    .select('id, name')
-    .not('drafter_id', 'is', null);
+  // --- Update Database ---
+  const { data: drafted } = await supabase.from('players').select('id, name').not('drafter_id', 'is', null);
+  if (!drafted) return { matched: [], unmatched: [] };
 
-  if (!draftedPlayers) return { matched: [], unmatched: [] };
-
-  let updateCount = 0;
-  for (const player of draftedPlayers) {
-    const rounds = allStats[player.name];
+  let totalUpserts = 0;
+  for (const p of drafted) {
+    const rounds = allStats[p.name];
     if (rounds) {
       for (const [roundName, points] of Object.entries(rounds)) {
         await supabase.from('player_scores').upsert({
-          player_id: player.id,
+          player_id: p.id,
           round_name: roundName,
           points: points,
           updated_at: new Date().toISOString()
         }, { onConflict: 'player_id,round_name' });
-        updateCount++;
+        totalUpserts++;
       }
     }
   }
 
-  onProgress?.(`✓ Success: Updated ${updateCount} score entries.`);
+  onProgress?.(`✓ Score Sync Complete. Updated ${totalUpserts} entries.`);
   return { matched: [], unmatched: [] };
 }
