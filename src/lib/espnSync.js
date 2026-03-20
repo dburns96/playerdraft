@@ -1,40 +1,34 @@
 import { supabase } from './supabase.js'
 
-const TOURNAMENT_DATES = ['20260317', '20260318', '20260319', '20260320', '20260321', '20260322']
+const TOURNAMENT_DATES = [
+  '20260317', '20260318', // Play-In
+  '20260319', '20260320', // Round of 64
+  '20260321', '20260322', // Round of 32
+]
 
+// The DATE_TO_ROUND map is a fallback, but we'll use headlines first
 const DATE_TO_ROUND = {
   '20260317': 'Play-In', '20260318': 'Play-In',
   '20260319': 'Round of 64', '20260320': 'Round of 64',
-  '20260321': 'Round of 32', '20260322': 'Round of 32'
+  '20260321': 'Round of 32', '20260322': 'Round of 32',
 }
 
 async function autoEliminateLosers(completedEvents, onProgress) {
   const losingTeamIds = new Set();
   
   for (const event of completedEvents) {
-    // LAYER 1: League & Status Check
-    // League "50" is Men's College Basketball. 
-    // Status name "STATUS_FINAL" ensures the game is actually over.
+    // SECURITY: Only games that are STATUS_FINAL and part of the NCAA Tournament
     if (event.status?.type?.name !== 'STATUS_FINAL') continue;
     
-    // LAYER 2: Tournament Only
-    // Season type 3 is Postseason. Headline check prevents NIT/CBI leaks.
-    const headline = (event.notes?.[0]?.headline || "").toLowerCase();
-    if (event.season?.type !== 3 && !headline.includes("ncaa")) continue;
+    // Ignore any game that happened before the tournament officially started
+    const gameDateStr = event.date.slice(0, 10).replace(/-/g, '');
+    if (gameDateStr < '20260317') continue;
 
     const competitors = event.competitions?.[0]?.competitors || [];
-    const team1 = competitors[0];
-    const team2 = competitors[1];
-    if (!team1 || !team2) continue;
-
-    // LAYER 3: The Score Lock
-    // A team cannot lose if the game score is 0-0.
-    const score1 = parseInt(team1.score || "0");
-    const score2 = parseInt(team2.score || "0");
-
-    if (score1 > 0 && score2 > 0) {
-      if (team1.winner === false && score1 < score2) losingTeamIds.add(String(team1.team.id));
-      if (team2.winner === false && score2 < score1) losingTeamIds.add(String(team2.team.id));
+    for (const c of competitors) {
+      if (c.winner === false && c.team?.id) {
+        losingTeamIds.add(String(c.team.id));
+      }
     }
   }
 
@@ -46,14 +40,14 @@ async function autoEliminateLosers(completedEvents, onProgress) {
     .eq('is_eliminated', false)
     .not('espn_team_id', 'is', null);
 
-  if (!players || players.length === 0) return;
+  if (!players?.length) return;
 
-  // Strict ID match to the "Loser Set" we just built
   const toEliminate = players.filter(p => losingTeamIds.has(String(p.espn_team_id)));
   if (toEliminate.length === 0) return;
 
-  await supabase.from('players').update({ is_eliminated: true }).in('id', toEliminate.map(p => p.id));
-  onProgress?.(`✓ Validated Eliminations: ${toEliminate.map(p => `${p.name} (${p.team})`).join(', ')}`);
+  const ids = toEliminate.map(p => p.id);
+  await supabase.from('players').update({ is_eliminated: true }).in('id', ids);
+  onProgress?.(`✓ Eliminated: ${toEliminate.map(p => p.name).join(', ')}`);
 }
 
 export async function syncTournamentScores(onProgress) {
@@ -62,33 +56,42 @@ export async function syncTournamentScores(onProgress) {
   
   const allStats = {};
   const completedEvents = [];
+  const processedGameIds = new Set(); // TRACK GAMES TO PREVENT DUPLICATES
 
   for (const dateStr of datesToFetch) {
-    // Explicitly call the Men's Basketball endpoint
-    const res = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=${dateStr}&groups=100&limit=100`);
+    const res = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=${dateStr}&groups=50&limit=300`);
     const { events = [] } = await res.json();
 
     for (const event of events) {
-      const eventDate = event.date.slice(0, 10).replace(/-/g, '');
-      const roundName = DATE_TO_ROUND[eventDate] || 'Round of 64';
+      // 1. Skip if game happened before March 17 or we already processed this Game ID
+      const gameDateStr = event.date.slice(0, 10).replace(/-/g, '');
+      if (gameDateStr < '20260317' || processedGameIds.has(event.id)) continue;
       
-      if (event.status?.type?.completed) {
-        event._tournamentRound = roundName;
-        completedEvents.push(event);
-      }
+      // 2. Only process completed games
+      if (event.status?.type?.name !== 'STATUS_FINAL') continue;
+
+      processedGameIds.add(event.id);
+      
+      // 3. Determine round (Headline priority -> Date fallback)
+      const headline = (event.notes?.[0]?.headline || "").toLowerCase();
+      let roundName = DATE_TO_ROUND[gameDateStr] || 'Round of 64';
+      if (headline.includes('first four') || headline.includes('play-in')) roundName = 'Play-In';
+
+      event._tournamentRound = roundName;
+      completedEvents.push(event);
 
       const sumRes = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/summary?event=${event.id}`);
       const summary = await sumRes.json();
+
       summary.boxscore?.players?.forEach(team => {
         team.statistics?.forEach(group => {
           const ptsIdx = (group.names || []).indexOf('PTS');
           group.athletes?.forEach(ath => {
             const pts = parseInt(ath.stats?.[ptsIdx]);
             if (ath.athlete?.displayName && !isNaN(pts)) {
-              if (!allStats[ath.athlete.displayName]) allStats[ath.athlete.displayName] = [];
-              if (!allStats[ath.athlete.displayName].some(s => s.roundName === roundName)) {
-                allStats[ath.athlete.displayName].push({ points: pts, roundName });
-              }
+              const pName = ath.athlete.displayName;
+              if (!allStats[pName]) allStats[pName] = [];
+              allStats[pName].push({ points: pts, roundName });
             }
           });
         });
@@ -98,7 +101,7 @@ export async function syncTournamentScores(onProgress) {
 
   await autoEliminateLosers(completedEvents, onProgress);
 
-  const { data: drafted } = await supabase.from('players').select('id, name, team').not('drafter_id', 'is', null);
+  const { data: drafted } = await supabase.from('players').select('id, name').not('drafter_id', 'is', null);
   if (drafted) {
     for (const p of drafted) {
       const stats = allStats[p.name];
@@ -112,5 +115,6 @@ export async function syncTournamentScores(onProgress) {
       }
     }
   }
+
   return { matched: [], unmatched: [] };
 }
