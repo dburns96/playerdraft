@@ -9,7 +9,6 @@ const TOURNAMENT_DATES = [
   '20260404', '20260406'  // Final Four / Championship
 ]
 
-// Forces points into the correct column based on the date
 const DATE_TO_ROUND = {
   '20260317': 'Play-In', '20260318': 'Play-In',
   '20260319': 'Round of 64', '20260320': 'Round of 64',
@@ -21,18 +20,18 @@ const DATE_TO_ROUND = {
 
 async function autoEliminateLosers(completedEvents, onProgress) {
   const losingTeamIds = new Set();
+  const validDates = new Set(TOURNAMENT_DATES);
   
   for (const event of completedEvents) {
-    // 1. Only eliminate if the game is actually FINISHED
+    // 1. MUST be completed
     if (event.status?.type?.completed !== true) continue;
     
-    // 2. SECURITY CHECK: Only process NCAA Men's Tournament games
-    const isMens = (event.league?.name?.toLowerCase() || "").includes("men") || 
-                   (event.shortName?.toLowerCase() || "").includes("men");
-    const isWomens = (event.name?.toLowerCase() || "").includes("women") || 
-                     (event.notes?.[0]?.headline?.toLowerCase() || "").includes("women");
-    
-    if (isWomens || (!isMens && event.season?.type !== 3)) continue;
+    // 2. MUST be within the NCAA Tournament dates (Blocks March 14 Big 12 loss)
+    const eventDate = event.date.slice(0, 10).replace(/-/g, '');
+    if (!validDates.has(eventDate)) continue;
+
+    // 3. MUST be Men's Postseason
+    if (event.season?.type !== 3 && event.season?.type !== '3') continue;
 
     const competitors = event.competitions?.[0]?.competitors || [];
     for (const c of competitors) {
@@ -60,8 +59,8 @@ async function autoEliminateLosers(completedEvents, onProgress) {
 }
 
 export async function syncTournamentScores(onProgress) {
-  const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const datesToFetch = TOURNAMENT_DATES.filter(d => d <= today);
+  const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const datesToFetch = TOURNAMENT_DATES.filter(d => d <= todayStr);
   
   const allStats = {};
   const completedEvents = [];
@@ -73,13 +72,15 @@ export async function syncTournamentScores(onProgress) {
     const { events = [] } = await res.json();
 
     for (const event of events) {
-      const roundName = DATE_TO_ROUND[dateStr] || 'Postseason';
+      const eventDate = event.date.slice(0, 10).replace(/-/g, '');
+      const roundName = DATE_TO_ROUND[eventDate] || 'Postseason';
       
       if (event.status?.type?.completed) {
         event._tournamentRound = roundName;
         completedEvents.push(event);
       }
 
+      // Fetch player stats for scoring
       const sumRes = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/summary?event=${event.id}`);
       const summary = await sumRes.json();
 
@@ -117,5 +118,7 @@ export async function syncTournamentScores(onProgress) {
       } else { unmatched.push(p.name); }
     }
   }
+
+  await supabase.from('settings').upsert({ key: 'last_espn_sync', value: new Date().toISOString() });
   return { matched, unmatched };
 }
